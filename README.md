@@ -7,9 +7,6 @@ This project uses a split-binary architecture to achieve massive performance:
 1. **Geometry Data:** Tightly packed, 64-byte aligned structs are loaded directly into an `ArenaAllocator` for hardware L1 cache optimization.
 2. **Payload Data:** Heavy metadata (strings, text, star names) are completely decoupled from the math nodes to avoid CPU cache pollution, accessed via a 64-bit pointer.
 
-### Dataset Acknowledgement
-The default star dataset used for testing is the HYG Database. A massive thank you to David Nash for providing it.
-You can find the raw HYG dataset here: [astronexus/hyg-database](https://github.com/astronexus/hyg-database)
 
 ## Project Structure
 ```text
