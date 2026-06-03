@@ -84,7 +84,7 @@ float box_distance_squared(OctreeNode* node, float tx, float ty, float tz) {
 * Maintains a Max-Heap (`std::priority_queue`) of the $K$ closest stars found so far.
 * The current pruning threshold is dynamically defined:
   - If the heap has fewer than $K$ elements, the search radius is infinite.
-  - If the heap has exactly $K$ elements, the search radius is set to the distance of the furthest star currently in the heap ($\sqrt{\text{heap.top().dist\_sq}}$).
+  - If the heap has exactly $K$ elements, the search radius is set to the distance of the furthest star currently in the heap.
 * If a node's bounding box distance to the target is larger than the current heap's maximum distance, the node and all its children are pruned.
 * As closer stars are found, the search radius shrinks, making subsequent subtrees prune even faster.
 
