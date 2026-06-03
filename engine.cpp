@@ -4,10 +4,118 @@
 #include <chrono>
 #include <cmath>
 #include <limits>
+#include <queue>
+#include <iomanip>
+#include <sstream>
+#include <algorithm>
 #include "types.h"
 #include "arena_allocator.h"
 
 using namespace std;
+
+enum DistanceUnit { PC, LY, AU };
+
+float convert_to_parsecs(float distance, DistanceUnit unit) {
+    if (unit == LY) return distance * 0.306601f;
+    if (unit == AU) return distance * 4.84814e-6f;
+    return distance;
+}
+
+float convert_from_parsecs(float distance_pc, DistanceUnit unit) {
+    if (unit == LY) return distance_pc / 0.306601f;
+    if (unit == AU) return distance_pc / 4.84814e-6f;
+    return distance_pc;
+}
+
+void print_star_metadata(ifstream& payload_file, uint64_t pointer, float dist_pc, DistanceUnit display_unit) {
+    payload_file.seekg(pointer, ios::beg);
+    string raw_csv;
+    getline(payload_file, raw_csv, '\0');
+
+    vector<string> fields;
+    stringstream ss(raw_csv);
+    string field;
+    while (getline(ss, field, ',')) {
+        fields.push_back(field);
+    }
+
+    // HYG mappings: ID=0, ProperName=6, Mag=13, Spectrum=15
+    string name = fields.size() > 6 && !fields[6].empty() ? fields[6] : "Unnamed";
+    string id = fields.size() > 0 ? fields[0] : "?";
+    string mag = fields.size() > 13 ? fields[13] : "?";
+    string spect = fields.size() > 15 ? fields[15] : "?";
+
+    float converted_dist = convert_from_parsecs(dist_pc, display_unit);
+    string unit_str = (display_unit == PC) ? " pc" : (display_unit == LY) ? " ly" : " au";
+
+    cout << left << setw(10) << id << setw(20) << name << setw(15) << (to_string(converted_dist) + unit_str) 
+         << setw(10) << mag << setw(15) << spect << endl;
+}
+
+float box_distance_squared(OctreeNode* node, float tx, float ty, float tz) {
+    float closest_x = max(node->min_x, min(tx, node->max_x));
+    float closest_y = max(node->min_y, min(ty, node->max_y));
+    float closest_z = max(node->min_z, min(tz, node->max_z));
+
+    float dx = closest_x - tx;
+    float dy = closest_y - ty;
+    float dz = closest_z - tz;
+    return (dx * dx) + (dy * dy) + (dz * dz);
+}
+
+struct QueryResult {
+    uint32_t star_idx;
+    float dist_sq;
+    bool operator<(const QueryResult& other) const {
+        return dist_sq < other.dist_sq;
+    }
+};
+
+void query_radius_recursive(OctreeNode* node, float tx, float ty, float tz, float r_sq, const Star* all_stars, vector<QueryResult>& results) {
+    if (box_distance_squared(node, tx, ty, tz) > r_sq) return;
+
+    if (node->is_leaf) {
+        for (int i = 0; i < node->star_count; i++) {
+            uint32_t s_idx = node->star_indices[i];
+            const Star& s = all_stars[s_idx];
+            float dx = s.x - tx; float dy = s.y - ty; float dz = s.z - tz;
+            float dist_sq = (dx*dx) + (dy*dy) + (dz*dz);
+            if (dist_sq <= r_sq) {
+                results.push_back({s_idx, dist_sq});
+            }
+        }
+    } else {
+        for (int i = 0; i < 8; i++) {
+            query_radius_recursive(&node->first_child[i], tx, ty, tz, r_sq, all_stars, results);
+        }
+    }
+}
+
+void query_knn_recursive(OctreeNode* node, float tx, float ty, float tz, int k, const Star* all_stars, priority_queue<QueryResult>& heap) {
+    float current_r_sq = (heap.size() == k) ? heap.top().dist_sq : numeric_limits<float>::max();
+    
+    if (box_distance_squared(node, tx, ty, tz) > current_r_sq) return;
+
+    if (node->is_leaf) {
+        for (int i = 0; i < node->star_count; i++) {
+            uint32_t s_idx = node->star_indices[i];
+            const Star& s = all_stars[s_idx];
+            float dx = s.x - tx; float dy = s.y - ty; float dz = s.z - tz;
+            float dist_sq = (dx*dx) + (dy*dy) + (dz*dz);
+            
+            if (heap.size() < k) {
+                heap.push({s_idx, dist_sq});
+            } else if (dist_sq < heap.top().dist_sq) {
+                heap.pop();
+                heap.push({s_idx, dist_sq});
+            }
+        }
+    } else {
+        for (int i = 0; i < 8; i++) {
+            query_knn_recursive(&node->first_child[i], tx, ty, tz, k, all_stars, heap);
+        }
+    }
+}
 
 void set_child_bounds(OctreeNode* parent, OctreeNode* child, int index) {
     float mid_x = (parent->min_x + parent->max_x) / 2.0f;
@@ -127,6 +235,58 @@ int main() {
     cout << "\nTotal Initialization Time: " << diff.count() << " seconds" << endl;
     cout << "Arena Memory Consumed: " << (arena.get_used_memory() / 1024.0 / 1024.0) << " MB" << endl;
     
+    cout << "\nQuery Engine:" << endl;
+    
+    ifstream payload_file("./data/parsed/payload.bin", ios::binary);
+    if (!payload_file.is_open()) {
+        cerr << "CRITICAL ERROR: Could not open payload.bin for queries" << endl;
+        return 1;
+    }
+
+    // Target: Earth (0, 0, 0)
+    float target_x = 0.0f, target_y = 0.0f, target_z = 0.0f;
+    
+    // Radius Search (5 Parsecs)
+    float search_radius_pc = convert_to_parsecs(5.0f, PC);
+    cout << "\n[Query] Radius Search: Stars within 5 Parsecs of Earth" << endl;
+    cout << left << setw(10) << "ID" << setw(20) << "Name" << setw(15) << "Distance" << setw(10) << "Mag" << setw(15) << "Spectrum" << endl;
+    cout << "----------------------------------------------------------------------" << endl;
+    
+    vector<QueryResult> r_results;
+    auto q1_start = chrono::high_resolution_clock::now();
+    query_radius_recursive(root, target_x, target_y, target_z, search_radius_pc * search_radius_pc, stars, r_results);
+    auto q1_end = chrono::high_resolution_clock::now();
+    
+    // Sort results by distance
+    sort(r_results.begin(), r_results.end(), [](const QueryResult& a, const QueryResult& b) { return a.dist_sq < b.dist_sq; });
+    for (const auto& res : r_results) {
+        print_star_metadata(payload_file, stars[res.star_idx].payload_pointer, sqrt(res.dist_sq), PC);
+    }
+    cout << "Radius Search executed in " << chrono::duration<double, milli>(q1_end - q1_start).count() << " ms." << endl;
+
+    // Test 2: KNN Search (Closest 10 stars)
+    cout << "\n[Query] KNN Search: 10 closest stars to Earth (Light Years)" << endl;
+    cout << left << setw(10) << "ID" << setw(20) << "Name" << setw(15) << "Distance" << setw(10) << "Mag" << setw(15) << "Spectrum" << endl;
+    cout << "----------------------------------------------------------------------" << endl;
+    
+    priority_queue<QueryResult> knn_heap;
+    auto q2_start = chrono::high_resolution_clock::now();
+    query_knn_recursive(root, target_x, target_y, target_z, 10, stars, knn_heap);
+    auto q2_end = chrono::high_resolution_clock::now();
+
+    // The heap pops the furthest first, so we extract and reverse to print closest first
+    vector<QueryResult> knn_results;
+    while (!knn_heap.empty()) {
+        knn_results.push_back(knn_heap.top());
+        knn_heap.pop();
+    }
+    reverse(knn_results.begin(), knn_results.end());
+
+    for (const auto& res : knn_results) {
+        print_star_metadata(payload_file, stars[res.star_idx].payload_pointer, sqrt(res.dist_sq), LY);
+    }
+    cout << "KNN Search executed in " << chrono::duration<double, milli>(q2_end - q2_start).count() << " ms." << endl;
+
     delete[] stars;
     return 0;
 }
